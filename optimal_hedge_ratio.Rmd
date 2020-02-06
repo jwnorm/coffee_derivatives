@@ -1,0 +1,77 @@
+---
+title: "Optimal Hedge Ratio"
+author: "Jacob Norman"
+date: "2/19/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r load_packages, include=FALSE}
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(kableExtra)
+```
+```{r data_prep, echo=FALSE}
+futures <- read.csv(file="data/csv/us_c_futures.csv")
+spot <- read.csv(file="data/csv/monthly_indicator_prices_cal.csv")
+spot <- spot %>%
+  filter(Year >= 1980)
+futures <- futures[0:462,0:2]
+futures$date <- as.Date(paste(futures$date,01), "%b %y %d")
+spot <- spot$Other_milds
+```
+
+## Exploratory Data Analysis
+
+```{r corr_plot, echo=FALSE}
+prices <- as.data.frame(cbind(spot, futures))
+colnames(prices)[3] <- "futures"
+
+prices %>%
+  ggplot(aes(spot,futures)) +
+  geom_point() + geom_smooth(method="lm") +
+  labs(title = "Correlation of Spot and Futures Prices")
+```
+
+```{r spot_futures_price, echo=FALSE}
+prices %>%
+  ggplot() + geom_line(aes(date, spot)) +
+  geom_line(aes(date, futures), color = "blue") +
+  labs(y="price", title="Spot vs Futures Price")
+```
+
+```{r spread, echo=FALSE}
+prices$spread <- prices$futures - prices$spot
+
+prices %>%
+  ggplot() + geom_line(aes(date, spread)) + labs(title = "Future-Spot Spread")
+```
+
+```{r mean_spread, echo=FALSE}
+cat(sprintf("Average price spread:\t-$%.4f",mean(prices$spread)*-1))
+```
+
+This means that on average, the spot price is roughly $7.34 more than the futures price.
+
+## Optimal Hedge Ratio
+
+```{r optimal_hedge_ratio, echo=FALSE}
+futures <- futures[,2]
+p <- cor(spot,futures, method = "pearson")
+var_spot <- var(spot)
+var_futures <- var(futures)
+h <- p * (sqrt(var_spot) / sqrt(var_futures))
+df <- as.data.frame(cbind(rbind("Optimal hedge ratio","Correlation coefficient",
+      "R-squared", "Spot variance", "Futures variance"),rbind(h,p,p*p,
+                                                              var_spot,var_futures)))
+rownames(df) <- NULL
+df$V2 <- round(as.numeric(paste(df$V2)), 4)
+colnames(df) <- NULL
+df %>%
+  kable() %>%
+  kable_styling()
+```
+

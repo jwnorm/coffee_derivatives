@@ -1,0 +1,209 @@
+---
+title: "Coffee Spot Price Model"
+author: "Jacob Norman"
+date: "2/19/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_packages, include=FALSE}
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(fGarch)
+library(TTR)
+library(forecast)
+library(kableExtra)
+```
+
+## Exploratory Data Analysis
+
+```{r import_data, include=FALSE}
+spot <- read.csv(file="data/csv/monthly_indicator_prices_cal.csv")
+```
+
+```{r date_conversion, echo=FALSE}
+spot$date <- paste(spot$Month,"01", spot$Year)
+spot$date <- as.Date(spot$date, "%B %d %Y")
+colnames(spot)[5] <- "arabica"
+spot$log <- log(spot$arabica)
+str(spot)
+```
+
+Below is the data provided by the *International Coffee Organisation* (ICO). The price of interest is the **arabica** column. This is the category "Other Milds", which is the par delivery value of the futures contract.
+
+```{r table, echo=FALSE}
+spot %>%
+  kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  scroll_box(width = "700px", height = "500px")
+```
+
+
+```{r price_plot, echo=FALSE}
+spot %>%
+  ggplot(aes(date, log)) + 
+  geom_line(color="blue") + 
+  labs(x="Date", y="price", 
+       title="Spot Price of Green Coffee Beans Over Time")
+```
+
+Here is an overview of the spot price over time, 1965 to 2018.
+
+```{r volatility, echo=FALSE}
+volatility <-volatility(na.omit(spot$arabica), calc = "close")
+spot$volatility <- append(volatility, c(NA, NA), after = 0)
+
+spot %>%
+  ggplot(aes(date, volatility)) + 
+  geom_line(color="red") + 
+  geom_smooth(method = "loess")
+```
+
+The variance of arabica beans is not consistent over time. A GARCH model might be required.
+
+```{r decompose, echo=FALSE}
+spot.ts <- ts(spot$arabica,
+                frequency = 12, start = c(1965,1))
+log.ts <- ts(spot$log,
+                frequency = 12, start = c(1965,1))
+
+plot(decompose(log.ts, type = "multiplicative"))
+```
+
+Just like the futures price, there is a large seasonal element to the price data. This is no surprise considering it is an agricultural commodity.
+
+```{r acf_pacf, echo=FALSE}
+acf(log.ts, lag.max = 500, na.action = na.pass)
+pacf(log.ts, lag.max = 500, na.action = na.pass)
+```
+
+The ACF and PACF are very similar to the ones provided by the futures price.
+
+## ARIMA Model
+
+Once again we are going to create an ARIMA model based on R's ``auto.arima()`` function. It believes an **ARIMA(2,1,2)** is the best model for the spot data. We later applied this function to the futures ARIMA-GARCH parameters.
+
+```{r train_test_split, echo=FALSE}
+#split data into train and test sets
+train.ts <- window(log.ts, start = c(1965,1), end = c(2016,12))
+test.ts <- window(log.ts, start = c(2017,1))
+
+#create model
+model <- auto.arima(train.ts)
+plot.ts(model$residuals, ylab = "residual")
+```
+
+```{r forecast_test, echo=FALSE}
+test.forecast <- forecast(model, h=length(test.ts))
+plot(test.forecast)
+```
+
+```{r residuals_test, echo=FALSE}
+plot(test.ts - test.forecast$mean)
+cat(sprintf("Mean residual deviation:\t%.4f", mean(test.ts - test.forecast$mean)))
+```
+
+
+```{r forecast_full, echo=FALSE}
+full.forecast <- forecast(auto.arima(spot.ts), h = 24)
+plot(full.forecast)
+```
+
+Like with the futures price analysis, we see that a simple ARIMA model tends to be very flat. This provides almost no value as a predictive tool. Let's move on to an ARIMA-GARCH combination model.
+
+## GARCH
+
+```{r garch_train, include=FALSE}
+fit.train = garchFit(~arma(2, 1, 2) + garch(1, 1), data = na.omit(train.ts))
+pred.test <- predict(fit.train, n.ahead = 18)
+```
+
+```{r pred_test_plot, echo=FALSE}
+date <- seq(as.Date("1965/01/01"), by = "month", length.out = 642)
+price <- append(train.ts, pred.test$meanForecast, after = length(train.ts))
+df.test <- as.data.frame(price)
+df.test$date <- date
+
+df.test %>%
+  ggplot() + geom_line(aes(date,price)) +
+  geom_line(data = df.test[df.test$date > as.Date("2016-12-01"),], 
+              aes(x = date, y = price), color = "red") +
+  labs(y = "spot", title = "ARIMA(2,1,2) + GARCH(1,1)", subtitle = "Test Data")
+```
+
+The red line indicates the projected price of in the spot market for arabica beans. It is no longer flat as it once was. Since this is for our training data set, we can test it on the 18 months of data we did not feed the model.
+
+```{r test_residuals, echo=FALSE}
+plot.ts(exp(log.ts[625:642] - df.test$price[625:642]), ylab = "residual")
+cat(sprintf("Mean residual deviation:\t%.4f",
+        mean(exp(log.ts[625:642] - df.test$price[625:642]))))
+```
+
+The residual analysis here is good. The mean residual deviation is close to zero, which is desired.
+
+```{r fit_full, include=FALSE}
+fit.full = garchFit(~arma(2, 1, 2) + garch(1, 1), data = na.omit(log.ts))
+pred.full <- predict(fit.full, n.ahead = 30, plot = TRUE)
+```
+
+```{r pred_full_plot, echo=FALSE}
+date.full <- seq(as.Date("1965/01/01"), by = "month", length.out = 672)
+price.full <- append(log.ts, pred.full$meanForecast, after = length(log.ts))
+df.full <- as.data.frame(price.full)
+df.full$date <- date.full
+colnames(df.full)[1] <- "log_price"
+df.full$log_upper <- append(rep_len(NA, length.out = length(log.ts)),
+                        pred.full$upperInterval,
+                        after = length(log.ts))
+df.full$log_lower <- append(rep_len(NA, length.out = length(log.ts)),
+                        pred.full$lowerInterval, after = length(log.ts))
+
+df.full %>%
+  ggplot() + geom_line(aes(date ,log_price)) +
+  geom_line(data = df.full[df.full$date > as.Date("2018-6-01"),], 
+              aes(date, log_price), color = "red") +
+  geom_line(data = df.full[df.full$date > as.Date("2018-6-01"),], 
+              aes(date, log_upper), color = "black", alpha = 0.3) +
+  geom_line(data = df.full[df.full$date > as.Date("2018-6-01"),], 
+              aes(date, log_lower), color = "black", alpha = 0.3) +
+  labs(y = "ln(spot price)", title = "ARIMA(2,1,2) + GARCH(1,1)")
+```
+
+```{r}
+df.full$price <- exp(df.full$log_price)
+df.full$upper <- exp(df.full$log_upper)
+df.full$lower <- exp(df.full$log_lower)
+
+df.full %>%
+  ggplot() + geom_line(aes(date ,price)) +
+  geom_line(data = df.full[df.full$date > as.Date("2018-6-01"),], 
+              aes(date, price), color = "red") +
+  geom_line(data = df.full[df.full$date > as.Date("2018-6-01"),], 
+              aes(date, upper), color = "black", alpha = 0.3) +
+  geom_line(data = df.full[df.full$date > as.Date("2018-6-01"),], 
+              aes(date, lower), color = "black", alpha = 0.3) +
+  labs(y = "spot price", title = "ARIMA(2,1,2) + GARCH(1,1)") + ylim(0,320)
+```
+
+The model predicts that prices in the spot market will heavily decline through 2020. This is consistent with the prediction in the futures market, and since they are very highly correlated with one another, this makes logical sense.
+
+```{r full_residuals, echo=FALSE}
+plot.ts(exp(fit.full@residuals), ylab = "residual")
+acf(exp(fit.full@residuals))
+pacf(exp(fit.full@residuals))
+```
+
+The ACF, PACF, and residual plot all indicate white noise, which is desired. Below is a data table of the predicted spot price values through December 2020:
+
+```{r pred_table, echo=FALSE}
+df.full[643:672,] %>%
+  kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  scroll_box(width = "500px", height = "400px")
+```
+
+
